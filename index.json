@@ -1,0 +1,66 @@
+{
+  "format": 1,
+  "title": "DeepAI Code router for DeepSeek Harness",
+  "description": "DeepSeek Harness model providers that add their own routing layer: capability-ordered model ladders with automatic, per-turn failover.",
+  "metadata": {
+    "categories": {
+      "models": {
+        "title": "Model providers"
+      }
+    },
+    "labels": {
+      "routing": {
+        "title": "Routing"
+      },
+      "failover": {
+        "title": "Failover"
+      }
+    },
+    "sortKeys": {}
+  },
+  "plugins": [
+    {
+      "name": "dsh-deepaicode-auto",
+      "title": "DeepAI Code router",
+      "description": "Registers the DeepAI Code model catalog as the \"DeepAI Code\" provider and adds the virtual \"Auto (DeepAiCode)\" model: Frontier models first, unmetered models when the daily credit allowance is spent, hot failover on every upstream failure, and an SSE idle watchdog so a stalled stream never drops a turn.",
+      "icon": "https://github.com/luciomerlo/dsh-deepaicode-auto/raw/main/icon.svg",
+      "author": "Lucio Merlo",
+      "homepage": "https://github.com/luciomerlo/dsh-deepaicode-auto#readme",
+      "repository": {
+        "url": "https://github.com/luciomerlo/dsh-deepaicode-auto"
+      },
+      "metadata": {
+        "category": "models",
+        "keywords": [
+          "deepseek-harness",
+          "dsh-plugin",
+          "cordis",
+          "cordis-plugin",
+          "llm-router",
+          "ai-router",
+          "failover",
+          "deepai",
+          "openai-compatible",
+          "sse"
+        ],
+        "labels": [
+          "routing",
+          "failover"
+        ],
+        "sortKeys": {}
+      },
+      "versions": [
+        {
+          "version": "1.0.0",
+          "publishTimestamp": 1795129932,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/luciomerlo/dsh-deepaicode-auto",
+            "commit": "9f2e1eb5dd7f0d441b29289d04952b9c551684bd"
+          },
+          "engines": {}
+        }
+      ]
+    }
+  ]
+}
