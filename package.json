@@ -1,0 +1,61 @@
+{
+  "name": "dsh-deepaicode-auto",
+  "version": "1.0.0",
+  "private": true,
+  "description": "DeepAI Code provider for DeepSeek Harness with a capability-ordered Frontier-to-Unmetered model router, per-turn failover and an SSE idle watchdog.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "cordis",
+    "cordis-plugin",
+    "llm-router",
+    "ai-router",
+    "failover",
+    "deepai",
+    "openai-compatible",
+    "sse"
+  ],
+  "author": "Lucio Merlo",
+  "license": "MIT",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./index.json": "./index.json",
+    "./package.json": "./package.json"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/luciomerlo/dsh-deepaicode-auto.git"
+  },
+  "homepage": "https://github.com/luciomerlo/dsh-deepaicode-auto#readme",
+  "bugs": {
+    "url": "https://github.com/luciomerlo/dsh-deepaicode-auto/issues"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": [
+    "index.js",
+    "src",
+    "cordis.patch.yml",
+    "index.json",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
+  "scripts": {
+    "build": "node scripts/check.mjs && node --test",
+    "test": "node --test",
+    "market": "node scripts/market-index.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

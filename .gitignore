@@ -1,0 +1,29 @@
+# Dependencies and local install artefacts
+node_modules/
+.pnpm-store/
+
+# Secrets: never commit a real credential file
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local DSH state
+.dsh/
+.cordis/
+.plugin-manager/
+.plugin-market/
+
+# Build and test output
+coverage/
+dist/
+*.log
+*.tsbuildinfo
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
