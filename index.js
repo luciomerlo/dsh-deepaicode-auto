@@ -26,6 +26,8 @@ import { ConnectionController } from './src/connection.js'
 import { resolveMachineDigest } from './src/identity.js'
 import { AutoRouter } from './src/router.js'
 import { registerDeepAiCodeRoutes } from './src/routes.js'
+import { createFreeModelsTool, registerFreeModelsTool } from './src/tools.js'
+import { FreeModelVerifier, VERIFY_INTERVAL_MS } from './src/verify.js'
 
 export const name = 'deepaicode-auto'
 export const inject = ['llm']
@@ -47,6 +49,7 @@ const DEFAULTS = {
   failoverExplicitModels: false,
   requestTimeoutMs: 180_000,
   streamIdleTimeoutMs: 90_000,
+  verifyFreeModelsEveryMs: VERIFY_INTERVAL_MS,
   machineId: '',
   frontier: undefined,
   unmetered: undefined,
@@ -142,11 +145,21 @@ export function apply(ctx, input) {
     throw new Error('deepaicode-auto: the llm service refused the adapter registration')
   }
 
+  // The free model tier is re-established rather than remembered: one daily
+  // read of the catalog decides which models cost nothing now.
+  const verifier = new FreeModelVerifier({
+    catalog,
+    config,
+    logger,
+    rebuild: () => adapter.syncCatalog(),
+  })
+
   // The connection controller owns every interactive authentication step, and
   // the settings routes are its only caller. Both stay optional: a headless
   // profile has no Web server and keeps its model provider regardless.
-  const controller = new ConnectionController({ client, catalog, router, store, config, logger })
+  const controller = new ConnectionController({ client, catalog, router, store, config, logger, verifier })
   const routesMounted = registerDeepAiCodeRoutes(ctx, controller, logger)
+  const toolMounted = registerFreeModelsTool(ctx, createFreeModelsTool({ verifier }), logger)
 
   /**
    * Resolve the credential from config, environment, the plugin store, or the
@@ -201,21 +214,26 @@ export function apply(ctx, input) {
   }
 
   // Startup work runs inside one effect so the plugin's lifetime owns it: the
-  // catalog refresh and the allowance probe are exactly the "on every start"
-  // behaviour the routing contract promises.
+  // catalog read, the free-model verification and the allowance probe are
+  // exactly the "on every start" behaviour the routing contract promises.
   const lifetime = new AbortController()
   ctx.effect(() => {
     void (async () => {
       try {
         client.setMachine(await resolveMachineDigest({ override: config.machineId, logger }))
+        // start() hydrates the persisted report first, so the first diff of this
+        // session compares against the last real check instead of reporting
+        // every free model as new.
+        await verifier.start()
         await resolveCredential()
         if (!client.hasKey()) {
-          await catalog.refresh({ force: true }).catch(() => {})
+          await verifier.verify({ force: true }).catch(() => {})
+          logger.warn('deepaicode: the free-model tier stays on the published table until an account is connected')
           return
         }
         const lane = await client.revalidateLane(lifetime.signal).catch(() => client.lane)
         logger.info(`deepaicode: lane ${lane}, provider "${PROVIDER_ID}" ready`)
-        await catalog.refresh({ force: true }).catch(() => {})
+        const verification = await verifier.verify({ force: true })
         try {
           const allowance = await client.ensureCheckIn(lifetime.signal)
           if (allowance !== undefined && (typeof allowance.balance === 'number' || typeof allowance.granted === 'number')) {
@@ -229,8 +247,10 @@ export function apply(ctx, input) {
         }
         logger.info(
           `deepaicode: ${String(catalog.list().size)} models (${catalog.live ? 'live catalog' : 'published fallback'}), `
+          + `${String(verification.freeCount)} free (verified ${verification.verified ? 'live' : 'from the published table'}), `
           + `${config.autoModelName} routes Frontier models first`
-          + `${routesMounted ? '; settings page mounted at Settings → DeepAI Code' : ''}`,
+          + `${routesMounted ? '; settings page mounted at Settings → DeepAI Code' : ''}`
+          + `${toolMounted ? `; tool ${'deepaicode_free_models'} mounted` : ''}`,
         )
       } catch (error) {
         controller.setError(error)
@@ -239,6 +259,7 @@ export function apply(ctx, input) {
     })()
     return () => {
       lifetime.abort()
+      verifier.stop()
       if (typeof registration === 'function') registration()
     }
   }, 'deepaicode-auto: provider registration lifetime')

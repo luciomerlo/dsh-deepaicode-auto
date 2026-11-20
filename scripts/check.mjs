@@ -126,6 +126,8 @@ await check('runtime modules import', async () => {
     'src/routes.js',
     'src/sse.js',
     'src/stream.js',
+    'src/tools.js',
+    'src/verify.js',
   ]
   for (const relative of modules) {
     await import(new URL(`../${relative}`, import.meta.url).href)

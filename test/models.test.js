@@ -95,3 +95,47 @@ test('the selector badge distinguishes a priced model from an unmetered one', ()
   assert.equal(modelBadge({ tier: 'frontier', theos: 15 }), '15 Theos')
   assert.equal(modelBadge({ tier: 'unmetered', theos: 0 }), 'Unmetered · 0 Theos')
 })
+
+test('a configured free model that the live catalog prices becomes Frontier', () => {
+  const catalog = new Map([
+    ['deepseek-v4.1-flash', { id: 'deepseek-v4.1-flash', label: 'DeepSeek V4.1 Flash', cost: 4, api: 'openai-completions', contextWindow: 1, maxTokens: 1 }],
+  ])
+  const ladder = buildLadder({ unmetered: ['deepseek-v4.1-flash', 'free-two'] }, catalog, { authoritative: true })
+  assert.equal(ladder.unmetered.some(rung => rung.id === 'deepseek-v4.1-flash'), false, 'it must not stay free')
+  const moved = ladder.frontier.find(rung => rung.id === 'deepseek-v4.1-flash')
+  assert.ok(moved, 'it is still reachable, as a priced model')
+  assert.equal(moved.theos, 4)
+  assert.equal(moved.reclassified, true)
+  assert.deepEqual(ladder.reclassified, [{ id: 'deepseek-v4.1-flash', from: 'unmetered', to: 'frontier', theos: 4, label: 'DeepSeek V4.1 Flash' }])
+})
+
+test('a configured model the live catalog no longer lists leaves the ladder', () => {
+  const catalog = new Map([
+    ['kept', { id: 'kept', label: 'Kept', cost: 0, api: 'openai-completions', contextWindow: 1, maxTokens: 1 }],
+  ])
+  const ladder = buildLadder({
+    frontier: [{ id: 'gone-frontier', theos: 5 }],
+    unmetered: ['kept', 'gone-free'],
+  }, catalog, { authoritative: true })
+  assert.deepEqual(ladder.unmetered.map(rung => rung.id), ['kept'])
+  assert.equal(ladder.frontier.some(rung => rung.id === 'gone-frontier'), false)
+  assert.deepEqual(ladder.skipped.sort(), ['gone-free', 'gone-frontier'])
+})
+
+test('without a live catalog the configured tiers stand unchanged', () => {
+  const ladder = buildLadder({ unmetered: ['free-one'] })
+  assert.equal(ladder.authoritative, false)
+  assert.ok(ladder.unmetered.some(rung => rung.id === 'free-one'))
+  assert.deepEqual(ladder.reclassified, [])
+  assert.deepEqual(ladder.skipped, [])
+})
+
+test('a zero-cost catalog entry stays free even when configured as Frontier', () => {
+  const catalog = new Map([
+    ['was-paid', { id: 'was-paid', label: 'Was Paid', cost: 0, api: 'openai-completions', contextWindow: 1, maxTokens: 1 }],
+  ])
+  const ladder = buildLadder({ frontier: [{ id: 'was-paid', theos: 15 }] }, catalog, { authoritative: true })
+  const rung = ladder.frontier.find(r => r.id === 'was-paid')
+  assert.equal(rung.theos, 0)
+  assert.equal(modelBadge(rung), 'Unmetered · 0 Theos', 'the picker must not advertise a cost it does not charge')
+})

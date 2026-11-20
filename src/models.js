@@ -137,25 +137,41 @@ export function positive(value, fallback = 131072) {
  * A model named in both tables is treated as Frontier, because an explicit
  * cost in the catalog wins over the configured tier.
  *
+ * The live catalog is authoritative when it is present: it decides which models
+ * exist and what each one costs. A configured "unmetered" model that the
+ * catalog now prices moves to the Frontier tier, and a configured model the
+ * catalog no longer lists leaves the ladder. Without a live catalog the
+ * configured tables stand, because nothing can be verified.
+ *
  * @param {{frontier?: ReadonlyArray<{id: string, theos?: number, label?: string}>, unmetered?: ReadonlyArray<string>}} config - plugin Config tier tables.
  * @param {ReadonlyMap<string, {id: string, label: string, cost: number | undefined, api: string, contextWindow: number, maxTokens: number}>} [catalog] - normalized live catalog, keyed by model id.
- * @returns {{frontier: Array<object>, unmetered: Array<object>}} the two ordered rungs.
+ * @param {{authoritative?: boolean}} [options] - `authoritative` marks the catalog as a live read.
+ * @returns {{frontier: Array<object>, unmetered: Array<object>, reclassified: Array<object>, skipped: string[], authoritative: boolean}} the ordered rungs plus what the catalog overruled.
  */
-export function buildLadder(config, catalog = new Map()) {
+export function buildLadder(config, catalog = new Map(), options = {}) {
   const configuredFrontier = Array.isArray(config.frontier) && config.frontier.length > 0
     ? config.frontier
     : DEFAULT_FRONTIER
   const configuredUnmetered = Array.isArray(config.unmetered) && config.unmetered.length > 0
     ? config.unmetered
     : DEFAULT_UNMETERED
+  const authoritative = options.authoritative === true && catalog.size > 0
 
   const frontier = []
+  const unmetered = []
+  const reclassified = []
+  const skipped = []
   const seen = new Set()
+
   for (const row of configuredFrontier) {
     const id = typeof row === 'string' ? row : row?.id
     if (typeof id !== 'string' || id.length === 0 || seen.has(id)) continue
     seen.add(id)
     const live = catalog.get(id)
+    if (authoritative && live === undefined) {
+      skipped.push(id)
+      continue
+    }
     const declared = typeof row === 'object' && row !== null ? row.theos : undefined
     const theos = live?.cost !== undefined
       ? live.cost
@@ -172,12 +188,32 @@ export function buildLadder(config, catalog = new Map()) {
     })
   }
 
-  const unmetered = []
   for (const row of configuredUnmetered) {
     const id = typeof row === 'string' ? row : row?.id
     if (typeof id !== 'string' || id.length === 0 || seen.has(id)) continue
     seen.add(id)
     const live = catalog.get(id)
+    if (authoritative && live === undefined) {
+      skipped.push(id)
+      continue
+    }
+    // The catalog is the only authority on price: a model configured as free
+    // that upstream now charges for must stop being spent as if it were free.
+    if (authoritative && typeof live?.cost === 'number' && live.cost > UNMETERED_COST) {
+      reclassified.push({ id, from: 'unmetered', to: 'frontier', theos: live.cost, label: live.label })
+      frontier.push({
+        id,
+        tier: 'frontier',
+        label: live.label || id,
+        theos: live.cost,
+        api: live.api,
+        contextWindow: live.contextWindow,
+        maxTokens: live.maxTokens,
+        inCatalog: true,
+        reclassified: true,
+      })
+      continue
+    }
     unmetered.push({
       id,
       tier: 'unmetered',
@@ -215,7 +251,7 @@ export function buildLadder(config, catalog = new Map()) {
   discovered.sort((a, b) => b.theos - a.theos || a.id.localeCompare(b.id))
   frontier.push(...discovered)
 
-  return { frontier, unmetered }
+  return { frontier, unmetered, reclassified, skipped, authoritative }
 }
 
 /**

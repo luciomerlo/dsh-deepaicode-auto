@@ -8,6 +8,7 @@ fails over transparently instead of dropping a turn.
 - Provider route: `deepaicode`
 - Virtual model id: `auto` (displayed as `Auto (DeepAiCode)`)
 - Settings page: **Settings → DeepAI Code**, for connecting and inspecting the account
+- API: the `deepaicode_free_models` tool reports and re-verifies the free tier
 - Runtime: pure ESM JavaScript, no build step, no runtime dependencies on any `@deepseek-ai/*`
   package
 - Licence: MIT
@@ -112,13 +113,43 @@ the next model. Without the watchdog a stalled connection would hang the turn in
 ### Catalog and allowance lifecycle
 
 - **On start:** resolve the machine fingerprint, resolve the credential, probe the accepted lane,
-  read `/models`, then run one `/theos` check-in and publish the reported balance.
-- **On failure:** background `/models` refresh.
+  verify the free tier against `/models`, then run one `/theos` check-in and publish the reported
+  balance.
+- **On failure:** background `/models` refresh and a tier rebuild.
+- **Every day:** the free tier is verified again (see below).
 - **Periodically:** `/theos` at most once a minute, and the `/theos` check-in cycle on its own
   schedule (minimum 30 s between attempts, `check_in` TTL/2 refresh, 6 h silence after a
   `check_in_refused`).
 - **Daily reset:** the router clears retired models at the next UTC midnight, or as soon as a
   positive balance is reported again.
+
+### Free tier verification
+
+The unmetered tier is only useful while its members really cost nothing, so membership is
+re-established rather than remembered.
+
+- **The live catalog is the authority.** It decides which models exist and what each one costs. A
+  model configured as free that upstream now charges for **moves to the Frontier tier** instead of
+  being spent as if it were free; a configured model the catalog no longer lists leaves the ladder;
+  a Frontier model the catalog now prices at zero is advertised as free.
+- **Cadence:** once every `verifyFreeModelsEveryMs` (24 h), at start, and on any manual refresh.
+  The schedule is a chained timer, never an interval, so a slow check cannot overlap the next one,
+  and it is clamped to at least one minute.
+- **Report:** the check records which models are free now, which newly became free, which became
+  paid, which vanished from the catalog, and when the next check runs. It is persisted at
+  `$DSH_HOME/deepaicode/free-models.json`, so "last verified" survives a restart and the first
+  check of a new session compares against the last real one instead of reporting everything as
+  new.
+- **Unverified state is explicit.** Without a credential the catalog cannot be read, so the tier
+  falls back to the published table and both surfaces say *not verified* rather than pretending
+  the list is current.
+
+Read it from either surface:
+
+| Surface | How |
+|---|---|
+| **Web** | **Settings → DeepAI Code → Free models**: the count, the free ids, what changed at the last check, and when the next one runs. *Refresh* verifies immediately. |
+| **API** | The `deepaicode_free_models` tool. Call it with no arguments for the last report, or `verify: true` to re-read the catalog and rebuild the tiers now. |
 
 ### Allowance accounting is deliberately conservative about guessing
 
@@ -269,6 +300,7 @@ A Config mapping replaces the whole default block, so copy the keys you want to 
 | `failoverExplicitModels` | `false` | Let an explicitly chosen model continue on the ladder. |
 | `requestTimeoutMs` | `180000` | Deadline for opening a stream connection. |
 | `streamIdleTimeoutMs` | `90000` | Frame-gap deadline of the SSE watchdog; `0` disables it. |
+| `verifyFreeModelsEveryMs` | `86400000` | Cadence of the free-tier verification (clamped to at least 60000). |
 | `machineId` | `''` | Override for the hardware identity (also `DEEPAI_MACHINE_ID`). |
 | `frontier` | 16 rows | Ordered Frontier ladder: `{ id, theos, label }`. |
 | `unmetered` | 11 ids | Ordered unmetered ladder. |
@@ -358,12 +390,14 @@ registers under the package name into `settings.section` with route paths matchi
 no `@deepseek-ai/*` package is imported at runtime, and that no local path or credential pattern
 reached the repository.
 
-The 66-test suite covers the routing policy directly — Frontier-before-Unmetered priority,
+The 86-test suite covers the routing policy directly — Frontier-before-Unmetered priority,
 affordability filtering, quota retirement, cooldown expiry, daily reset, authentication abort,
 mid-stream no-replay, empty-response failover, the SSE watchdog, the selector catalog, and the
 plugin entry point — plus the settings connection controller (status shape, key verification,
-sign-out precedence, polling that costs no upstream request) and the browser artifact, which is
-executed in a sandbox to prove its registration and dictionary keys.
+sign-out precedence, polling that costs no upstream request), the free-tier verifier (baseline
+handling, daily re-arming, price reclassification, persisted report, cadence clamping), the
+`deepaicode_free_models` tool's output contract, and the browser artifact, which is executed in a
+sandbox to prove its registration and dictionary keys.
 
 ### Layout
 
@@ -382,6 +416,8 @@ src/sse.js            SSE frame reader + idle watchdog
 src/body.js           request body construction and desktop shape fallback
 src/auth.js           RFC 8252 sign-in and credential storage
 src/identity.js       instance id and hashed machine fingerprint
+src/verify.js         daily free-tier verification, change report and its schedule
+src/tools.js          the model-facing deepaicode_free_models tool
 src/connection.js     connect / disconnect / status controller behind the settings page
 src/routes.js         the /deepaicode/* Host routes and their trust fence
 ```

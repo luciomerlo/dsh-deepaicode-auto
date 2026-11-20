@@ -96,7 +96,7 @@ export function createAdapter(parts) {
    * @returns {object} the ladder just installed.
    */
   function refreshLadder() {
-    const ladder = buildLadder(config, catalog.list())
+    const ladder = buildLadder(config, catalog.list(), { authoritative: catalog.live })
     router.setLadder(ladder)
     return ladder
   }
@@ -439,6 +439,18 @@ export function createAdapter(parts) {
         return
       }
       yield* streamExplicit(options, rung)
+    },
+
+    /**
+     * Rebuild the tiers from the current catalog and return the ladder.
+     *
+     * The daily free-model check calls this after re-reading the catalog, so the
+     * router, the model picker and the settings page never disagree.
+     *
+     * @returns {object} the ladder just installed.
+     */
+    syncCatalog() {
+      return refreshLadder()
     },
 
     /**

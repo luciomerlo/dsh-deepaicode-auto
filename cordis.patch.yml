@@ -20,6 +20,10 @@
         # treated as a transport failure, so a stalled connection fails over
         # instead of hanging the turn.
         streamIdleTimeoutMs: 90000
+        # The free (0-Theos) tier is re-verified against the live catalog on this
+        # cadence. A configured "unmetered" model that upstream now charges for
+        # leaves the free tier instead of being spent as if it were free.
+        verifyFreeModelsEveryMs: 86400000
         # Frontier tier: ordered highest reasoning capability first. The router
         # only spends daily Theos on models whose typical cost still fits in the
         # remaining allowance.

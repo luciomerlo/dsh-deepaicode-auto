@@ -69,6 +69,17 @@ window.__ModuleLoader__.load({
       'routing.fallbacks': 'Recent fallbacks',
       'routing.noFallbacks': 'None — no request has needed a fallback.',
       'routing.exhausted': 'Retired today',
+      'free.title': 'Free models',
+      'free.count': 'unmetered models',
+      'free.verified': 'verified against the live catalog',
+      'free.snapshot': 'from the published table, not verified',
+      'free.never': 'Not verified yet — press Refresh.',
+      'free.next': 'next check',
+      'free.unchanged': 'No change since the last check.',
+      'free.newlyFree': 'Newly free',
+      'free.noLongerFree': 'Now paid — moved to the Frontier tier',
+      'free.removed': 'No longer listed upstream',
+      'free.hint': 'Verified against the live catalog once a day and again whenever a model fails.',
       'error.busy': 'The previous action has not finished yet.',
       'error.request': 'The DeepAI Code host route refused this request',
     }
@@ -287,6 +298,7 @@ window.__ModuleLoader__.load({
       const sourceKey = status && status.credentialSource ? `connection.source.${status.credentialSource}` : 'connection.source.none'
       const catalog = status ? status.catalog : { count: 0, live: false }
       const routerState = status ? status.router : { frontierReady: 0, unmeteredReady: 0, recentHandoffs: [], exhausted: [] }
+      const verification = status ? status.verification : null
 
       return h('div', { className: 'dc-page' },
         h('style', null, CSS),
@@ -408,6 +420,37 @@ window.__ModuleLoader__.load({
                   `${handoff.from} → ${handoff.to} (${handoff.reason})`)))
               : h('div', { className: 'dc-muted' }, t('routing.noFallbacks')),
           ),
+        ),
+
+        h('section', { className: 'dc-card' },
+          h('h4', { className: 'dc-card-title' }, t('free.title')),
+          verification === null
+            ? h('div', { className: 'dc-muted' }, t('free.never'))
+            : h(React.Fragment, null,
+              h('div', { className: 'dc-status' },
+                h('span', null, `${String(verification.freeIds.length)} ${t('free.count')}`),
+                h('span', { className: 'dc-muted' },
+                  `${verification.verified ? t('free.verified') : t('free.snapshot')} · ${age(verification.ageMs)}`),
+              ),
+              h('div', { className: 'dc-url' }, verification.freeIds.join(', ')),
+              verification.nextCheckAt
+                ? h('div', { className: 'dc-muted' }, `${t('free.next')} ${new Date(verification.nextCheckAt).toLocaleString()}`)
+                : null,
+              verification.added.length > 0
+                ? h('div', null, `${t('free.newlyFree')}: ${verification.added.join(', ')}`)
+                : null,
+              verification.reclassified.length > 0
+                ? h('div', { className: 'dc-alert' },
+                  `${t('free.noLongerFree')}: ${verification.reclassified.map(entry => `${entry.id} (${String(entry.theos)} Theos)`).join(', ')}`)
+                : null,
+              verification.removed.length > 0
+                ? h('div', { className: 'dc-muted' }, `${t('free.removed')}: ${verification.removed.join(', ')}`)
+                : null,
+              verification.added.length === 0 && verification.reclassified.length === 0 && verification.removed.length === 0
+                ? h('div', { className: 'dc-muted' }, t('free.unchanged'))
+                : null,
+              h('div', { className: 'dc-muted' }, t('free.hint')),
+            ),
         ),
       )
     }

@@ -44,6 +44,7 @@ export class ConnectionController {
   #store
   #config
   #logger
+  #verifier
   /** @type {'config' | 'environment' | 'store' | 'desktop' | 'none'} */
   #source = 'none'
   /** @type {any} */
@@ -61,6 +62,7 @@ export class ConnectionController {
    * @param {import('./auth.js').AccountStore} parts.store - credential store.
    * @param {Record<string, any>} parts.config - resolved plugin config.
    * @param {{info: Function, warn: Function, debug: Function}} parts.logger - diagnostics sink.
+   * @param {object} [parts.verifier] - free-model verifier, when one is mounted.
    */
   constructor(parts) {
     this.#client = parts.client
@@ -69,6 +71,7 @@ export class ConnectionController {
     this.#store = parts.store
     this.#config = parts.config
     this.#logger = parts.logger
+    this.#verifier = parts.verifier
   }
 
   /**
@@ -138,6 +141,7 @@ export class ConnectionController {
         recentHandoffs: snapshot.recentHandoffs.slice(-5),
       },
       signIn: this.#signInPublic(),
+      verification: this.#verifier === undefined ? null : this.#verifier.report(),
       error: this.#lastError ?? null,
     }
   }
@@ -222,7 +226,10 @@ export class ConnectionController {
     this.setError(undefined)
     this.setAllowance(allowance)
     this.#signIn = undefined
-    await this.#catalog.refresh({ force: true }).catch(() => {})
+    // A new account can see a different catalog, so the tiers are re-verified
+    // before the page reports them.
+    if (this.#verifier !== undefined) await this.#verifier.verify({ force: true }).catch(() => {})
+    else await this.#catalog.refresh({ force: true }).catch(() => {})
     return this.status()
   }
 
@@ -251,12 +258,23 @@ export class ConnectionController {
 
   /**
    * Re-read the live catalog and the daily allowance.
+   *
+   * The catalog read is delegated to the verifier when one is mounted, so the
+   * free-model report and the routing tiers are refreshed by the same call the
+   * settings page's Refresh button makes.
+   *
    * @returns {Promise<object>} the refreshed status.
    */
   async refresh() {
-    await this.#catalog.refresh({ force: true }).catch(error => {
-      this.#logger.warn('deepaicode: catalog refresh failed', error)
-    })
+    if (this.#verifier !== undefined) {
+      await this.#verifier.verify({ force: true }).catch(error => {
+        this.#logger.warn('deepaicode: free-model verification failed', error)
+      })
+    } else {
+      await this.#catalog.refresh({ force: true }).catch(error => {
+        this.#logger.warn('deepaicode: catalog refresh failed', error)
+      })
+    }
     if (!this.#client.hasKey) return this.status()
     try {
       const allowance = await this.#client.theos()
