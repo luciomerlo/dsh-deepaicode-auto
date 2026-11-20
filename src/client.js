@@ -12,7 +12,7 @@
 
 import { randomBytes } from 'node:crypto'
 
-import { buildChatBody, chatBodyFallback } from './body.js'
+import { buildChatBody, buildResponsesBody, chatBodyFallback } from './body.js'
 import { createInstanceId } from './identity.js'
 
 /** Header names, exactly as the desktop client spells them. */
@@ -520,9 +520,12 @@ export class DeepAiClient {
    * @throws {UpstreamError} when no attempt succeeded.
    */
   async openStream(options, target, signal) {
-    const path = target.api === 'openai-responses' ? PATH_RESPONSES : PATH_CHAT
-    const body = buildChatBody(options, target.model)
-    const affinity = typeof body.prompt_cache_key === 'string' ? body.prompt_cache_key : ''
+    // Upstream splits its models across two endpoints and a model served by one
+    // is refused by the other, so the endpoint family comes from the catalog.
+    const isResponses = target.api === 'openai-responses'
+    const path = isResponses ? PATH_RESPONSES : PATH_CHAT
+    const body = isResponses ? buildResponsesBody(options, target.model) : buildChatBody(options, target.model)
+    const affinity = !isResponses && typeof body.prompt_cache_key === 'string' ? body.prompt_cache_key : ''
     // A hung upstream connection must not hold a turn open forever; the
     // deadline bounds connection setup only, because the body streams long
     // after the response headers arrived.
@@ -545,7 +548,7 @@ export class DeepAiClient {
 
     const error = await this.#toError(response, `model ${target.model}`)
 
-    if (error.bodyRejected) {
+    if (error.bodyRejected && !isResponses) {
       const corrected = chatBodyFallback(body, options.system)
       if (corrected !== undefined) {
         response = await post(corrected)

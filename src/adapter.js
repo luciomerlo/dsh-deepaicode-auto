@@ -11,7 +11,7 @@
  */
 
 import { buildLadder, modelBadge } from './models.js'
-import { toStreamChunks } from './stream.js'
+import { toResponsesChunks, toStreamChunks } from './stream.js'
 import { UpstreamError } from './client.js'
 
 /** Provider route this adapter owns. */
@@ -145,7 +145,12 @@ export function createAdapter(parts) {
    */
   async function* attempt(options, candidate, signal) {
     const response = await client.openStream(options, { model: candidate.id, api: candidate.api }, signal)
-    yield* toStreamChunks(response.body, candidate.id, signal, { idleTimeoutMs: config.streamIdleTimeoutMs })
+    const hooks = { idleTimeoutMs: config.streamIdleTimeoutMs }
+    // Each endpoint family has its own wire vocabulary: chat deltas versus typed
+    // Responses events. Translating with the wrong one yields an empty turn.
+    yield* candidate.api === 'openai-responses'
+      ? toResponsesChunks(response.body, candidate.id, signal, hooks)
+      : toStreamChunks(response.body, candidate.id, signal, hooks)
   }
 
   /**

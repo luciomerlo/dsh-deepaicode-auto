@@ -249,3 +249,91 @@ export function chatBodyFallback(body, system) {
   }
   return strict
 }
+
+/**
+ * Project harness messages onto the Responses `input` item list.
+ *
+ * The Responses API keeps the same three item kinds the harness produces:
+ * messages, `function_call`s and `function_call_output`s. Text inside a message
+ * is `input_text` for user/system turns and `output_text` for assistant turns.
+ *
+ * @param {ReadonlyArray<Record<string, unknown>>} messages - harness request messages.
+ * @returns {Array<Record<string, unknown>>} the `input` items.
+ */
+export function toResponsesInput(messages) {
+  const items = []
+
+  for (const message of messages) {
+    if (message.role === 'assistant') {
+      const text = []
+      for (const block of blocksOf(message.content)) {
+        if (block.type === 'text' && typeof block.text === 'string') text.push(block.text)
+        else if (block.type === 'tool-call') {
+          const id = typeof block.id === 'string' ? block.id : ''
+          const name = typeof block.name === 'string' ? block.name : ''
+          if (id === '' || name === '') continue
+          items.push({ type: 'function_call', call_id: id, name, arguments: JSON.stringify(parseArguments(block.arguments)) })
+        }
+      }
+      const joined = text.join('')
+      if (joined !== '') items.push({ role: 'assistant', content: [{ type: 'output_text', text: joined }] })
+      continue
+    }
+
+    const callId = toolCallIdOf(message)
+    if (callId !== undefined) {
+      const text = flattenText(message)
+      items.push({ type: 'function_call_output', call_id: callId, output: text !== '' ? text : '(no output)' })
+      continue
+    }
+
+    const text = flattenText(message)
+    const role = message.role === 'system' || message.role === 'developer' ? 'system' : 'user'
+    if (text !== '') items.push({ role, content: [{ type: 'input_text', text }] })
+  }
+
+  return items
+}
+
+/**
+ * Build a `/responses` request body.
+ *
+ * `max_output_tokens` is deliberately absent: upstream rejects a request that
+ * carries it with `400 This request cannot be accepted.`, and the endpoint takes
+ * no output cap this client can express.
+ *
+ * @param {object} options - the adapter's generate options.
+ * @param {string} model - the upstream model id.
+ * @returns {Record<string, unknown>} the request body.
+ */
+export function buildResponsesBody(options, model) {
+  const input = toResponsesInput(options.messages ?? [])
+  const systemFromMessages = input
+    .filter(item => item.role === 'system')
+    .map(item => item.content[0].text)
+    .join('\n')
+  const instructions = typeof options.system === 'string' && options.system !== ''
+    ? options.system
+    : systemFromMessages !== '' ? systemFromMessages : DEFAULT_SYSTEM_PROMPT
+
+  const body = {
+    model,
+    instructions,
+    // System turns travel in `instructions`, so they are not repeated in input.
+    input: input.filter(item => item.role !== 'system'),
+    stream: true,
+    store: false,
+  }
+
+  if (Array.isArray(options.tools) && options.tools.length > 0) {
+    body.tools = options.tools.map(tool => ({
+      type: 'function',
+      name: tool.name,
+      description: tool.description ?? '',
+      parameters: tool.parameters ?? { type: 'object', properties: {} },
+    }))
+  }
+  if (options.temperature !== undefined) body.temperature = options.temperature
+
+  return body
+}

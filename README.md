@@ -80,6 +80,23 @@ Unmetered models never consume allowance, so they are ordered by usefulness rath
 An unknown balance is treated as sufficient — the router prefers a Frontier model rather than
 guessing conservatively.
 
+### Two wire families
+
+Upstream splits its models across two endpoints, and a model served by one is refused by the
+other: `gpt-6-astra` answers `400 Model 'gpt-6-astra' is not available on this endpoint.` on
+`/chat/completions`. The catalog's `api` field decides which family each model uses.
+
+| Family | Endpoint | Body | Stream |
+|---|---|---|---|
+| `openai-completions` (26 models) | `POST /deepai_code/chat/completions` | OpenAI chat messages, `tools` wrapped in `function` | `choices[].delta` chunks |
+| `openai-responses` (`gpt-6-astra`) | `POST /deepai_code/responses` | `instructions` + `input` items (`message`, `function_call`, `function_call_output`) | typed events: `response.output_item.added`, `response.output_text.delta`, `response.function_call_arguments.delta`, `response.output_item.done`, `response.completed` |
+
+Both are translated into the same harness `StreamChunk` vocabulary by `src/stream.js`, so routing,
+failover and the SSE watchdog are family-agnostic. Two upstream quirks are encoded and covered by
+tests: `max_output_tokens` is **rejected** (`400 This request cannot be accepted.`), and the
+Responses endpoint needs `input` present — a chat-shaped body without it answers
+`'input' must be a non-empty string or array.`
+
 ### Failover pipeline
 
 `runChain()` (`src/adapter.js`) walks the plan and reacts to the class the router assigns to each
@@ -390,14 +407,15 @@ registers under the package name into `settings.section` with route paths matchi
 no `@deepseek-ai/*` package is imported at runtime, and that no local path or credential pattern
 reached the repository.
 
-The 86-test suite covers the routing policy directly — Frontier-before-Unmetered priority,
+The 95-test suite covers the routing policy directly — Frontier-before-Unmetered priority,
 affordability filtering, quota retirement, cooldown expiry, daily reset, authentication abort,
 mid-stream no-replay, empty-response failover, the SSE watchdog, the selector catalog, and the
 plugin entry point — plus the settings connection controller (status shape, key verification,
 sign-out precedence, polling that costs no upstream request), the free-tier verifier (baseline
 handling, daily re-arming, price reclassification, persisted report, cadence clamping), the
-`deepaicode_free_models` tool's output contract, and the browser artifact, which is executed in a
-sandbox to prove its registration and dictionary keys.
+`deepaicode_free_models` tool's output contract, both wire families (chat deltas and the typed
+Responses event stream, including function calls), and the browser artifact, which is executed in
+a sandbox to prove its registration and dictionary keys.
 
 ### Layout
 
