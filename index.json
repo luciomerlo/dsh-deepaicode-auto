@@ -51,12 +51,12 @@
       },
       "versions": [
         {
-          "version": "1.2.0",
-          "publishTimestamp": 1795133953,
+          "version": "1.3.0",
+          "publishTimestamp": 1795176965,
           "source": {
             "type": "git",
             "url": "https://github.com/luciomerlo/dsh-deepaicode-auto",
-            "commit": "d2e800901402644c39247b1d2a524fac940fb2f9"
+            "commit": "f824e16d6deab4cf45e990c7ab511b6ef711cb70"
           },
           "engines": {}
         }
