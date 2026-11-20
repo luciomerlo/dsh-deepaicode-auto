@@ -271,3 +271,38 @@ test('resolveModel advertises the widest context for Auto and the exact one for 
   assert.equal(explicit.id, 'frontier-b')
   assert.equal(explicit.defaultMaxTokens > 0, true)
 })
+
+/**
+ * Every member of the harness `LlmAdapter` contract, from
+ * `@deepseek-ai/dsh-llm`. Registering a route validates only the first two, but
+ * the runtime calls all of them later — `imageRequestPricing` is reached by the
+ * token meter during a model-switch compaction, where a missing member fails the
+ * turn instead of the registration.
+ */
+const LLM_ADAPTER_CONTRACT = [
+  'providerInfo',
+  'providerRetryPolicy',
+  'imageRequestPricing',
+  'imageRequestTarget',
+  'listModels',
+  'resolveModel',
+  'prepareCall',
+  'stream',
+]
+
+test('the adapter implements the whole LlmAdapter contract, not just the validated part', () => {
+  const { adapter } = buildAdapter({})
+  for (const member of LLM_ADAPTER_CONTRACT) {
+    assert.equal(typeof adapter[member], 'function', `the adapter must implement ${member}()`)
+  }
+})
+
+test('the image-pricing defaults match the base adapter, because no image is ever sent', () => {
+  const { adapter } = buildAdapter({})
+  // A compaction that switches models calls this before any request; returning
+  // undefined is what makes the token meter use its neutral estimate.
+  assert.equal(adapter.imageRequestPricing('deepaicode', 'auto'), undefined)
+  assert.equal(adapter.imageRequestPricing('deepaicode', 'frontier-a'), undefined)
+  const target = adapter.imageRequestTarget('deepaicode', 'auto', { width: 640, height: 480, bytes: 1234 })
+  assert.deepEqual(target, { width: 640, height: 480, maxBytes: 1234 })
+})

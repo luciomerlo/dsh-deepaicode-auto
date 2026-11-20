@@ -97,6 +97,15 @@ tests: `max_output_tokens` is **rejected** (`400 This request cannot be accepted
 Responses endpoint needs `input` present — a chat-shaped body without it answers
 `'input' must be a non-empty string or array.`
 
+### The adapter is duck-typed, and the contract is total
+
+The `llm` service imports nothing from this bundle, so the adapter is a plain object. Registering a
+route only validates `providerInfo` and `providerRetryPolicy`, but the runtime then calls **all**
+eight `LlmAdapter` members — `imageRequestPricing` is reached by the token meter, including during
+a model-switch compaction. A missing member therefore fails a *turn*, not the *registration*, with
+an error such as `imageRequestPricing is not a function`. `test/adapter.test.js` enumerates the full
+member list so a gap is caught before installation.
+
 ### Failover pipeline
 
 `runChain()` (`src/adapter.js`) walks the plan and reacts to the class the router assigns to each
@@ -407,7 +416,7 @@ registers under the package name into `settings.section` with route paths matchi
 no `@deepseek-ai/*` package is imported at runtime, and that no local path or credential pattern
 reached the repository.
 
-The 95-test suite covers the routing policy directly — Frontier-before-Unmetered priority,
+The 97-test suite covers the routing policy directly — Frontier-before-Unmetered priority,
 affordability filtering, quota retirement, cooldown expiry, daily reset, authentication abort,
 mid-stream no-replay, empty-response failover, the SSE watchdog, the selector catalog, and the
 plugin entry point — plus the settings connection controller (status shape, key verification,

@@ -2,10 +2,14 @@
  * The `llm`-service adapter: a duck-typed implementation of the harness
  * `LlmAdapter` contract that also owns the Auto (DeepAiCode) routing.
  *
- * The adapter deliberately imports nothing from `@deepseek-ai/*`. The service
- * validates a registered adapter by calling `providerInfo` and
- * `providerRetryPolicy`, so an ordinary object satisfies it, and the plugin
- * stays loadable from a profile install without resolving any harness package.
+ * The adapter deliberately imports nothing from `@deepseek-ai/*`. Registering a
+ * route only validates `providerInfo` and `providerRetryPolicy`, so an ordinary
+ * object is accepted — but the runtime later calls the **whole** contract
+ * (`imageRequestPricing`, `imageRequestTarget`, `listModels`, `resolveModel`,
+ * `prepareCall`, `stream`). Every member must therefore exist: a missing one
+ * surfaces far from registration, for example as
+ * `imageRequestPricing is not a function` when a model switch compacts the
+ * conversation. `test/adapter.test.js` asserts the full member list.
  *
  * @module dsh-deepaicode-auto/adapter
  */
@@ -334,6 +338,22 @@ export function createAdapter(parts) {
      */
     providerRetryPolicy() {
       return noHarnessRetryPolicy()
+    },
+
+    /**
+     * Declare provider-side image request pricing for one route.
+     *
+     * This client never sends images upstream, so it declares none and the token
+     * meter falls back to its own neutral estimate. The method must exist: the
+     * meter calls it per measurement, and a compaction that switches models
+     * calls it before any request is made.
+     *
+     * @param {string} _provider - the route.
+     * @param {string} _model - the model id.
+     * @returns {undefined} no provider-side pricing.
+     */
+    imageRequestPricing(_provider, _model) {
+      return undefined
     },
 
     /**
