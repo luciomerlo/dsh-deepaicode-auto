@@ -87,11 +87,24 @@ const CATALOG = {
 
 const LOGGER = { info() {}, warn() {}, debug() {} }
 
+/** A catalog stub carrying per-model context windows. */
+function catalogWith(windows) {
+  const map = new Map(Object.entries(windows).map(([id, contextWindow]) => [id, {
+    id,
+    label: id,
+    cost: 0,
+    api: 'openai-completions',
+    contextWindow,
+    maxTokens: 8192,
+  }]))
+  return { live: true, fetchedAt: Date.now(), list: () => map, refresh: async () => false }
+}
+
 /** Build an adapter over the given scripts and config. */
-function buildAdapter(scripts, config = CONFIG) {
+function buildAdapter(scripts, config = CONFIG, catalog = CATALOG) {
   const client = stubClient(scripts)
   const router = new AutoRouter({ budget: 250, maxFailovers: config.maxFailovers ?? 8 })
-  const adapter = createAdapter({ router, client, catalog: CATALOG, config, logger: LOGGER })
+  const adapter = createAdapter({ router, client, catalog, config, logger: LOGGER })
   return { adapter, client, router }
 }
 
@@ -267,7 +280,7 @@ test('the selector catalog advertises Auto first, then the priced and unmetered 
   assert.equal(new Set(models.map(m => m.id)).size, models.length, 'model ids must be unique')
 })
 
-test('resolveModel advertises the widest context for Auto and the exact one for a real model', async () => {
+test('resolveModel advertises a context window for Auto and the exact one for a real model', async () => {
   const { adapter } = buildAdapter({})
   const auto = await adapter.resolveModel('deepaicode', 'auto')
   assert.equal(auto.id, 'auto')
@@ -275,6 +288,22 @@ test('resolveModel advertises the widest context for Auto and the exact one for 
   const explicit = await adapter.resolveModel('deepaicode', 'frontier-b')
   assert.equal(explicit.id, 'frontier-b')
   assert.equal(explicit.defaultMaxTokens > 0, true)
+})
+
+test('Auto advertises the narrowest window on the ladder, not the widest', async () => {
+  // Routing to any rung means the smallest window is the only safe promise: the
+  // harness must start compacting before a conversation outgrows it.
+  const config = {
+    ...CONFIG,
+    frontier: [{ id: 'small', theos: 5, label: 'Small' }, { id: 'big', theos: 10, label: 'Big' }],
+    unmetered: [],
+  }
+  const { adapter } = buildAdapter({}, config, catalogWith({ small: 64_000, big: 400_000 }))
+  const auto = await adapter.resolveModel('deepaicode', 'auto')
+  assert.equal(auto.context.contextWindow, 64_000)
+  assert.ok(auto.defaultMaxTokens <= 32_768)
+  const explicit = await adapter.resolveModel('deepaicode', 'big')
+  assert.equal(explicit.context.contextWindow, 400_000, 'an explicit model keeps its own window')
 })
 
 /**
@@ -351,4 +380,56 @@ test('the free tier is used only after the paid budget is spent', async () => {
   const chunks = await collect(adapter.stream({ provider: 'deepaicode', model: 'auto', messages: [] }))
   assert.deepEqual(client.calls, ['paid-0', 'paid-1'], 'a working paid model is preferred over the free tier')
   assert.equal(chunks.filter(c => c.type === 'text-delta').map(c => c.text).join(''), 'paid answer')
+})
+
+/** The upstream refusal for a conversation that outgrew the model. */
+function contextOverflow() {
+  return new UpstreamError(400, 'context_length_exceeded', 'This conversation exceeds the context window. Compact it to continue.')
+}
+
+test('an oversized conversation asks the harness to compact instead of burning the ladder', async () => {
+  const scripts = {}
+  for (const id of ['frontier-a', 'frontier-b', 'free-a', 'free-b']) scripts[id] = { error: contextOverflow() }
+  const { adapter, client } = buildAdapter(scripts)
+  const chunks = await collect(adapter.stream({ provider: 'deepaicode', model: 'auto', messages: [] }))
+  // No other model has a wider window, so a second attempt could only fail the
+  // same way. One attempt, then the canonical code the harness recovers from.
+  assert.deepEqual(client.calls, ['frontier-a'])
+  const finish = chunks.at(-1)
+  assert.equal(finish.reason.kind, 'error')
+  assert.equal(finish.reason.failure.code, 'CONTEXT_WINDOW_EXCEEDED')
+  assert.match(finish.reason.failure.message, /exceeds the context window/)
+})
+
+test('a model too small for the conversation hands it to a wider one', async () => {
+  const scripts = {
+    small: { error: contextOverflow() },
+    big: { frames: stopFrames('fits here') },
+  }
+  const config = {
+    ...CONFIG,
+    frontier: [{ id: 'small', theos: 5, label: 'Small' }, { id: 'big', theos: 10, label: 'Big' }],
+    unmetered: [],
+    maxFailovers: 8,
+  }
+  const { adapter, client } = buildAdapter(scripts, config, catalogWith({ small: 64_000, big: 400_000 }))
+  const chunks = await collect(adapter.stream({ provider: 'deepaicode', model: 'auto', messages: [] }))
+  assert.deepEqual(client.calls, ['small', 'big'], 'only the wider model is worth trying')
+  assert.equal(chunks.filter(c => c.type === 'text-delta').map(c => c.text).join(''), 'fits here')
+  assert.deepEqual(chunks.at(-1), { type: 'finish', reason: { kind: 'stop' } })
+})
+
+test('an overflow does not retire the model for the next, smaller turn', async () => {
+  const scripts = { 'frontier-a': { error: contextOverflow() }, 'frontier-b': { error: contextOverflow() } }
+  const { adapter, router } = buildAdapter(scripts)
+  await collect(adapter.stream({ provider: 'deepaicode', model: 'auto', messages: [] }))
+  assert.equal(router.blockedReason('frontier-a'), undefined, 'the model is healthy, not cooling down')
+  assert.equal(router.plan()[0].id, 'frontier-a', 'the next turn starts from the top again')
+})
+
+test('an explicitly chosen model reports the canonical overflow code too', async () => {
+  const { adapter } = buildAdapter({ 'frontier-a': { error: contextOverflow() } })
+  const chunks = await collect(adapter.stream({ provider: 'deepaicode', model: 'frontier-a', messages: [] }))
+  assert.equal(chunks.at(-1).reason.kind, 'error')
+  assert.equal(chunks.at(-1).reason.failure.code, 'CONTEXT_WINDOW_EXCEEDED')
 })

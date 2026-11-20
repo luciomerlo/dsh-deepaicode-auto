@@ -166,6 +166,31 @@ test('failure classification maps statuses onto reactions', () => {
   assert.equal(classifyFailure({ code: 'TIMEOUT' }), 'transient')
 })
 
+test('an oversized conversation is a context overflow, not a rejected request', () => {
+  // The exact refusal upstream sends when the conversation no longer fits.
+  assert.equal(
+    classifyFailure({ status: 400, code: 'context_length_exceeded', message: 'This conversation exceeds the context window. Compact it to continue.' }),
+    'context',
+  )
+  // Either half on its own is enough.
+  assert.equal(classifyFailure({ code: 'context_length_exceeded' }), 'context')
+  assert.equal(classifyFailure({ status: 400, message: 'This conversation exceeds the context window.' }), 'context')
+  assert.equal(classifyFailure({ code: 'CONTEXT_WINDOW_EXCEEDED' }), 'context')
+  assert.equal(classifyFailure({ message: 'prompt is too long for this model' }), 'context')
+  // A plain malformed request must still be rejected, not treated as overflow.
+  assert.equal(classifyFailure({ status: 400, code: 'invalid_request_error', message: 'bad tool schema' }), 'rejected')
+})
+
+test('a context overflow cools nothing down and leaves the plan intact', () => {
+  const now = { value: 1_000 }
+  const router = routerAt(now)
+  router.setQuota(250)
+  const [big] = router.plan()
+  assert.equal(router.recordFailure(big, { status: 400, code: 'context_length_exceeded', message: 'too big' }), 'context')
+  assert.equal(router.blockedReason('big'), undefined, 'the model itself is healthy')
+  assert.deepEqual(router.plan().map(c => c.id), ['big', 'mid', 'small', 'free-a', 'free-b'])
+})
+
 test('the daily reset is the next UTC midnight', () => {
   const now = Date.UTC(2026, 10, 19, 23, 0, 0)
   assert.equal(nextDailyReset(now), Date.UTC(2026, 10, 20, 0, 0, 0))

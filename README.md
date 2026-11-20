@@ -106,6 +106,15 @@ a model-switch compaction. A missing member therefore fails a *turn*, not the *r
 an error such as `imageRequestPricing is not a function`. `test/adapter.test.js` enumerates the full
 member list so a gap is caught before installation.
 
+### Context window handling
+
+`Auto (DeepAiCode)` can route to any rung, so it advertises the **narrowest** context window on the
+ladder (with a 32k floor) rather than the widest: the harness then starts condensing before a
+conversation outgrows the smallest model that could answer it. If upstream still reports an
+oversized conversation, the adapter reports the canonical `CONTEXT_WINDOW_EXCEEDED` code — the one
+the compaction backend reacts to — and retries through the harness's own condensation path instead
+of failing the turn.
+
 ### Failover pipeline
 
 `runChain()` (`src/adapter.js`) walks the plan and reacts to the class the router assigns to each
@@ -115,6 +124,7 @@ of after the whole precomputed list is spent.
 
 | Class | Trigger | Reaction |
 |---|---|---|
+| `context` | `400` `context_length_exceeded` — "This conversation exceeds the context window." | The model is healthy; the conversation is too big. Nothing is cooled down, only a rung with a **wider** window is tried, and when none is left the turn ends with the canonical `CONTEXT_WINDOW_EXCEEDED` code so the harness condenses the conversation and retries instead of showing a dead end. |
 | `auth` | `401`, `auth_required`, `invalid_api_key`, `email_unverified` | Abort the chain. A credential problem is not the model's fault, so no model is cooled and no Theos are wasted on more attempts. |
 | `quota` | `403` `theos_exhausted` / `theos_insufficient` / `network_bound` / `check_in_refused`, `429` | Retire the **whole paid tier** for the day: every Frontier model draws on the same balance, and a refusal can mean this request alone costs more than what is left. The free tier serves the turn. |
 | `busy` | `409 session_busy` | 15 s cooldown, next model. |
@@ -418,7 +428,7 @@ registers under the package name into `settings.section` with route paths matchi
 no `@deepseek-ai/*` package is imported at runtime, and that no local path or credential pattern
 reached the repository.
 
-The 102-test suite covers the routing policy directly — Frontier-before-Unmetered priority,
+The 109-test suite covers the routing policy directly — Frontier-before-Unmetered priority,
 affordability filtering, quota retirement, cooldown expiry, daily reset, authentication abort,
 mid-stream no-replay, empty-response failover, the SSE watchdog, the selector catalog, and the
 plugin entry point — plus the settings connection controller (status shape, key verification,

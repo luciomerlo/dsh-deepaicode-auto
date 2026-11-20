@@ -39,16 +39,44 @@ const QUOTA_WORDS = /check_in_refused|network_bound|quota|daily limit|out of the
 const AUTH_WORDS = /invalid api key|api key|unauthori[sz]ed|forbidden|auth/i
 
 /**
+ * Wording upstream uses when the conversation does not fit the model.
+ *
+ * Upstream answers `400` with code `context_length_exceeded` and the sentence
+ * "This conversation exceeds the context window. Compact it to continue." The
+ * request is too large for the model; the model itself is fine.
+ */
+const CONTEXT_WORDS = new RegExp([
+  String.raw`context[\s_-](?:length|window)[\s_-]?(?:exceed\w*|overflow\w*|limit[\s_-]exceeded)`,
+  String.raw`(?:exceed\w*|overflow\w*)\s+the\s+context(?:\s+(?:length|window))?`,
+  String.raw`(?:maximum|max)\s+context\s+(?:length|window)`,
+  String.raw`too\s+(?:long|large)\s+for\s+(?:this|the)\s+model`,
+].join('|'), 'i')
+
+/**
+ * Whether a failure means the conversation outgrew the model's context window.
+ * @param {FailureFacts} facts - observed failure.
+ * @returns {boolean} true for a context-overflow failure.
+ */
+export function isContextOverflow(facts) {
+  return CONTEXT_WORDS.test(`${facts.code ?? ''} ${facts.message ?? ''}`)
+}
+
+/**
  * Classify an upstream failure into the reaction the router takes.
  * @param {FailureFacts} facts - observed failure.
- * @returns {'auth' | 'quota' | 'lane' | 'busy' | 'rejected' | 'transient'}
- *   `auth` aborts the whole attempt chain, `quota` retires the model for the
- *   day, `lane` asks the client to raise its lane header, and the rest cool the
- *   model down for a while.
+ * @returns {'auth' | 'quota' | 'context' | 'lane' | 'busy' | 'rejected' | 'transient'}
+ *   `auth` aborts the whole attempt chain, `quota` retires the paid tier for the
+ *   day, `context` is request-specific (the model is healthy, the conversation is
+ *   too big) and cools nothing, `lane` asks the client to raise its lane header,
+ *   and the rest cool the model down for a while.
  */
 export function classifyFailure(facts) {
   const status = facts.status
   const text = `${facts.code ?? ''} ${facts.message ?? ''}`
+  // Checked before the generic 400 branch: an overflow is not a rejected request
+  // shape, and treating it as one would cool every model down instead of letting
+  // the harness condense the conversation and retry.
+  if (isContextOverflow(facts)) return 'context'
   if (status === 426) return 'lane'
   if (status === 409) return 'busy'
   if (status === 401) return 'auth'
@@ -61,7 +89,7 @@ export function classifyFailure(facts) {
   if (/AUTH/i.test(facts.code ?? '') && !/[45]\d\d/.test(text)) return 'auth'
   if (status === 429) return 'quota'
   if (status === 400 || status === 413 || status === 422) return 'rejected'
-  if (/CONTEXT_WINDOW_EXCEEDED|INVALID_REQUEST|MALFORMED_RESPONSE|EMPTY_RESPONSE/i.test(facts.code ?? '')) return 'rejected'
+  if (/INVALID_REQUEST|MALFORMED_RESPONSE|EMPTY_RESPONSE/i.test(facts.code ?? '')) return 'rejected'
   return 'transient'
 }
 
@@ -246,7 +274,7 @@ export class AutoRouter {
    * Record a failed attempt and apply the reaction its class demands.
    * @param {Candidate} candidate - the model that failed.
    * @param {FailureFacts} facts - observed failure.
-   * @returns {'auth' | 'quota' | 'transient' | 'rejected'} the reaction applied.
+   * @returns {'auth' | 'quota' | 'context' | 'transient' | 'rejected'} the reaction applied.
    */
   recordFailure(candidate, facts) {
     const now = this.#now()
@@ -256,6 +284,11 @@ export class AutoRouter {
     switch (kind) {
       case 'auth':
         return 'auth'
+      case 'context':
+        // Request-specific: this model is healthy, the conversation is simply
+        // bigger than it can hold. Cooling it down would disqualify a working
+        // model for the next, smaller request, so nothing is retired here.
+        return 'context'
       case 'quota':
         this.#exhausted.add(candidate.id)
         this.#cooldownReason.set(candidate.id, 'quota')

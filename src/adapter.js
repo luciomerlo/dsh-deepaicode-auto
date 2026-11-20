@@ -17,6 +17,7 @@
 import { buildLadder, modelBadge } from './models.js'
 import { toResponsesChunks, toStreamChunks } from './stream.js'
 import { UpstreamError } from './client.js'
+import { classifyFailure } from './router.js'
 
 /** Provider route this adapter owns. */
 export const PROVIDER_ID = 'deepaicode'
@@ -74,6 +75,22 @@ class StreamFailure extends Error {
     this.name = 'StreamFailure'
     this.failure = failure
   }
+}
+
+/**
+ * Rewrite a failure to the canonical code the harness acts on.
+ *
+ * Upstream reports an oversized conversation as `400 context_length_exceeded`.
+ * The harness only condenses the conversation and retries when it sees its own
+ * `CONTEXT_WINDOW_EXCEEDED` code, so that mapping is what turns a dead end into
+ * an automatic recovery.
+ *
+ * @param {{message: string, code: string, status?: number}} failure - the observed failure.
+ * @returns {{message: string, code: string, status?: number}} the failure to report.
+ */
+export function canonicalFailure(failure) {
+  if (classifyFailure(failure) === 'context') return { ...failure, code: 'CONTEXT_WINDOW_EXCEEDED' }
+  return failure
 }
 
 /**
@@ -266,6 +283,24 @@ export function createAdapter(parts) {
         return
       }
 
+      if (reaction === 'context') {
+        // The model is healthy; this conversation is simply bigger than it can
+        // hold. Only a model with a wider window can help — anything narrower
+        // fails identically — and when none is left the canonical overflow code
+        // lets the harness condense the conversation and retry.
+        const wider = pending().filter(rung => (rung.contextWindow ?? 0) > (candidate.contextWindow ?? 0))
+        if (wider.length === 0) {
+          router.recordHandoff(candidate.id, 'none', 'context')
+          logger.warn(`deepaicode: ${candidate.id} reports the conversation exceeds its window; asking the harness to compact`)
+          yield { type: 'finish', reason: { kind: 'error', failure: canonicalFailure(terminal) } }
+          return
+        }
+        router.recordHandoff(candidate.id, wider[0].id, 'context')
+        logger.warn(`deepaicode: ${candidate.id} cannot hold this conversation; trying the wider ${wider[0].id}`)
+        plan = wider
+        continue
+      }
+
       const rest = pending()
       router.recordHandoff(candidate.id, rest[0]?.id ?? 'none', reaction)
       logger.warn(
@@ -315,11 +350,16 @@ export function createAdapter(parts) {
     let emitted = false
     try {
       for await (const chunk of attempt(options, candidate, signal)) {
-        if (chunk.type !== 'finish') emitted = true
-        yield chunk
-        if (chunk.type === 'finish') {
-          if (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted') {
-            router.recordFailure(candidate, chunk.reason.failure)
+        // Normalize an overflow to the code the harness recovers from, before
+        // the terminal chunk leaves this adapter.
+        const out = chunk.type === 'finish' && chunk.reason.kind === 'error'
+          ? { ...chunk, reason: { ...chunk.reason, failure: canonicalFailure(chunk.reason.failure) } }
+          : chunk
+        if (out.type !== 'finish') emitted = true
+        yield out
+        if (out.type === 'finish') {
+          if (out.reason.kind === 'error' || out.reason.kind === 'aborted') {
+            router.recordFailure(candidate, out.reason.failure)
             refreshCatalogInBackground()
           } else {
             router.recordSuccess(candidate)
@@ -330,7 +370,7 @@ export function createAdapter(parts) {
       yield {
         type: 'finish',
         reason: {
-          kind: emitted ? 'error' : 'error',
+          kind: 'error',
           failure: { message: `${candidate.id}: the stream ended without a terminal chunk`, code: 'STREAM_CLOSED' },
         },
       }
@@ -346,7 +386,17 @@ export function createAdapter(parts) {
         yield { type: 'finish', reason: { kind: 'error', failure: { message: facts.message ?? '', code: 'LANE_UNSUPPORTED' } } }
         return
       }
-      yield { type: 'finish', reason: { kind: 'error', failure: { message: facts.message ?? 'upstream failure', code: facts.code ?? 'TRANSPORT' } } }
+      yield {
+        type: 'finish',
+        reason: {
+          kind: 'error',
+          failure: canonicalFailure({
+            message: facts.message ?? 'upstream failure',
+            code: facts.code ?? 'TRANSPORT',
+            ...(facts.status === undefined ? {} : { status: facts.status }),
+          }),
+        },
+      }
     }
   }
 
@@ -441,14 +491,21 @@ export function createAdapter(parts) {
     async resolveModel(_provider, modelId) {
       const ladder = refreshLadder()
       if (modelId === autoId) {
-        const widest = [...ladder.frontier, ...ladder.unmetered]
-          .reduce((max, rung) => Math.max(max, rung.contextWindow ?? 0), 0)
+        // Auto may route to any rung, so it advertises the NARROWEST window on the
+        // ladder: a conversation the harness lets grow past the smallest model's
+        // limit would be accepted here and then refused upstream. The floor keeps
+        // one small model from forcing constant compaction on everything else.
+        const windows = [...ladder.frontier, ...ladder.unmetered]
+          .map(rung => rung.contextWindow ?? 0)
+          .filter(window => window > 0)
+        const narrowest = windows.length > 0 ? Math.min(...windows) : 131_072
+        const contextWindow = Math.max(narrowest, 32_768)
         return {
           provider: PROVIDER_ID,
           id: autoId,
           name: config.autoModelName,
-          context: { contextWindow: widest > 0 ? widest : 131_072 },
-          defaultMaxTokens: Math.min(32_768, widest > 0 ? widest : 131_072),
+          context: { contextWindow },
+          defaultMaxTokens: Math.min(32_768, contextWindow),
           inputModalities: ['text'],
         }
       }

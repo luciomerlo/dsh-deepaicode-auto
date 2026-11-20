@@ -1,6 +1,6 @@
 {
   "name": "dsh-deepaicode-auto",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "private": true,
   "description": "DeepAI Code provider for DeepSeek Harness with a capability-ordered Frontier-to-Unmetered model router, per-turn failover and an SSE idle watchdog.",
   "keywords": [
