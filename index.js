@@ -18,12 +18,14 @@ import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-import { AccountStore, startSignIn } from './src/auth.js'
+import { AccountStore } from './src/auth.js'
 import { ModelCatalog } from './src/catalog.js'
 import { DeepAiClient } from './src/client.js'
 import { createAdapter, PROVIDER_ID } from './src/adapter.js'
+import { ConnectionController } from './src/connection.js'
 import { resolveMachineDigest } from './src/identity.js'
 import { AutoRouter } from './src/router.js'
+import { registerDeepAiCodeRoutes } from './src/routes.js'
 
 export const name = 'deepaicode-auto'
 export const inject = ['llm']
@@ -41,7 +43,7 @@ const DEFAULTS = {
   dailyTheosBudget: 250,
   maxFailovers: 8,
   refreshCatalogOnError: true,
-  autoSignIn: true,
+  autoSignIn: false,
   failoverExplicitModels: false,
   requestTimeoutMs: 180_000,
   streamIdleTimeoutMs: 90_000,
@@ -140,55 +142,61 @@ export function apply(ctx, input) {
     throw new Error('deepaicode-auto: the llm service refused the adapter registration')
   }
 
+  // The connection controller owns every interactive authentication step, and
+  // the settings routes are its only caller. Both stay optional: a headless
+  // profile has no Web server and keeps its model provider regardless.
+  const controller = new ConnectionController({ client, catalog, router, store, config, logger })
+  const routesMounted = registerDeepAiCodeRoutes(ctx, controller, logger)
+
   /**
    * Resolve the credential from config, environment, the plugin store, or the
-   * desktop app; fall back to a browser sign-in when allowed.
+   * desktop app; start a browser sign-in only when the profile asked for one.
    * @returns {Promise<void>} resolves once an attempt has been made.
    */
   async function resolveCredential() {
     const configured = typeof config.apiKey === 'string' ? config.apiKey.trim() : ''
     if (configured !== '') {
       client.setApiKey(configured)
+      controller.setCredentialSource('config')
       return
     }
     const fromEnvironment = (process.env.DEEPAI_CODE_API_KEY ?? process.env.DEEPAI_API_KEY ?? '').trim()
     if (fromEnvironment !== '') {
       client.setApiKey(fromEnvironment)
+      controller.setCredentialSource('environment')
       return
     }
     await store.load()
     const stored = store.get()
     if (stored !== undefined) {
       client.setApiKey(stored.apiKey)
+      controller.setCredentialSource('store')
       return
     }
     const desktop = await readDesktopCredential()
     if (desktop !== undefined) {
       client.setApiKey(desktop)
+      controller.setCredentialSource('desktop')
       await store.save({ apiKey: desktop, username: '', isPro: false, obtainedAt: new Date().toISOString() }).catch(() => {})
       logger.info('deepaicode: reused the DeepAI Code desktop sign-in')
       return
     }
     if (config.autoSignIn !== true) {
-      logger.warn('deepaicode: no credential found; set DEEPAI_API_KEY, config.apiKey, or enable autoSignIn')
+      logger.warn('deepaicode: no DeepAI Code credential yet — connect from Settings → DeepAI Code, or set DEEPAI_CODE_API_KEY')
       return
     }
 
-    const session = startSignIn({ baseUrl: config.baseUrl, modelBase: config.modelBase, userAgent: config.userAgent })
-    const url = await session.ready().catch(() => '')
-    if (url === '') {
-      logger.warn('deepaicode: the local sign-in callback could not start')
-      return
-    }
-    logger.info(`deepaicode: sign in to DeepAI Code here — ${url}`)
-    openBrowser(url, logger)
+    // autoSignIn exists for profiles that have no settings page at all. The
+    // attempt still goes through the controller, so an open settings page
+    // follows the sign-in it did not start.
     try {
-      const account = await session.wait()
-      client.setApiKey(account.apiKey)
-      await store.save(account)
-      logger.info(`deepaicode: signed in${account.username === '' ? '' : ` as ${account.username}`}`)
+      const attempt = await controller.beginSignIn()
+      if (attempt.url !== undefined) {
+        logger.info(`deepaicode: sign in to DeepAI Code here — ${attempt.url}`)
+        openBrowser(attempt.url, logger)
+      }
     } catch (error) {
-      logger.warn('deepaicode: sign-in did not complete:', error instanceof Error ? error.message : error)
+      logger.warn('deepaicode: the local sign-in callback could not start', error)
     }
   }
 
@@ -212,16 +220,20 @@ export function apply(ctx, input) {
           const allowance = await client.ensureCheckIn(lifetime.signal)
           if (allowance !== undefined && (typeof allowance.balance === 'number' || typeof allowance.granted === 'number')) {
             router.setQuota(allowance.balance ?? null, allowance.granted)
+            controller.setAllowance(allowance)
             logger.info(`deepaicode: ${String(allowance.balance)} of ${String(allowance.granted)} Theos left today`)
           }
         } catch (error) {
+          controller.setError(error)
           logger.warn('deepaicode: the allowance probe failed at startup', error)
         }
         logger.info(
           `deepaicode: ${String(catalog.list().size)} models (${catalog.live ? 'live catalog' : 'published fallback'}), `
-          + `${config.autoModelName} routes Frontier models first`,
+          + `${config.autoModelName} routes Frontier models first`
+          + `${routesMounted ? '; settings page mounted at Settings → DeepAI Code' : ''}`,
         )
       } catch (error) {
+        controller.setError(error)
         logger.warn('deepaicode: startup failed', error)
       }
     })()

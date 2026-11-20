@@ -7,6 +7,7 @@ fails over transparently instead of dropping a turn.
 
 - Provider route: `deepaicode`
 - Virtual model id: `auto` (displayed as `Auto (DeepAiCode)`)
+- Settings page: **Settings → DeepAI Code**, for connecting and inspecting the account
 - Runtime: pure ESM JavaScript, no build step, no runtime dependencies on any `@deepseek-ai/*`
   package
 - Licence: MIT
@@ -209,11 +210,34 @@ source:
 3. `$DSH_HOME/deepaicode/account.json` — written by this plugin, mode `0600`.
 4. The credential the **DeepAI Code desktop app** already stored, so an installed app needs no
    second sign-in.
-5. A browser sign-in: an RFC 8252 loopback flow. The plugin binds `127.0.0.1` on a free port,
-   opens `GET /deepai_code/desktop_auth/?state=…&port=…`, receives the authorization code on
-   `127.0.0.1/auth-callback`, and exchanges it at `POST /deepai_code/desktop_auth/exchange/`.
+5. A browser sign-in started from the settings page: an RFC 8252 loopback flow. The plugin binds
+   `127.0.0.1` on a free port, opens `GET /deepai_code/desktop_auth/?state=…&port=…`, receives the
+   authorization code on `127.0.0.1/auth-callback`, and exchanges it at
+   `POST /deepai_code/desktop_auth/exchange/`.
 
-Set `autoSignIn: false` to skip step 5 and configure a key explicitly instead.
+### Connect from Settings
+
+**Settings → DeepAI Code** is the supported way to connect, re-check, or disconnect an account:
+
+- **Connection** — whether a credential is live and which of the five sources supplied it.
+  *Connect with browser* starts the loopback sign-in and opens the DeepAI page; the page polls the
+  Host and flips to *Connected* when the browser callback lands. *Disconnect* forgets the stored
+  key. When a key comes from configuration or the environment, disconnecting says so instead of
+  pretending to succeed.
+- **Daily allowance** — the Theos balance and daily grant `/theos` reported, with the refresh
+  time.
+- **Paste an account key** — for machines where the browser flow cannot run. The key is proven
+  against `/theos` before it is stored, and refused with the upstream message when it does not
+  work.
+- **Routing** — the accepted lane, catalog size and freshness, how many Frontier and unmetered
+  models are ready right now, and the last fallbacks Auto performed.
+
+The page talks to the plugin's own Host routes under `/deepaicode/*`; those routes sit behind the
+composition's connection trust fence (Host/Origin check plus browser authentication), so nothing
+is reachable without the GUI's own session.
+
+Set `autoSignIn: true` only for a profile with no Web GUI, where there is no page to sign in
+from; it opens the browser during startup instead.
 
 **Machine fingerprint.** Upstream grants the daily allowance per account *and* machine. The plugin
 reads the hardware UUID (`MachineGuid` then `Win32_ComputerSystemProduct.UUID` on Windows,
@@ -241,7 +265,7 @@ A Config mapping replaces the whole default block, so copy the keys you want to 
 | `dailyTheosBudget` | `250` | Allowance ceiling used until upstream reports a real one. |
 | `maxFailovers` | `8` | Maximum models tried for one request. |
 | `refreshCatalogOnError` | `true` | Re-read `/models` after a model failure. |
-| `autoSignIn` | `true` | Start the browser sign-in when no credential is found. |
+| `autoSignIn` | `false` | Start the browser sign-in during startup, for profiles with no settings page. |
 | `failoverExplicitModels` | `false` | Let an explicitly chosen model continue on the ladder. |
 | `requestTimeoutMs` | `180000` | Deadline for opening a stream connection. |
 | `streamIdleTimeoutMs` | `90000` | Frame-gap deadline of the SSE watchdog; `0` disables it. |
@@ -276,6 +300,7 @@ Example: prefer a cheaper Frontier ladder and a tolerant watchdog.
 | Symptom | Cause | Fix |
 |---|---|---|
 | No **DeepAI Code** group in the model picker | The bundle is installed but not enabled, or the row failed to activate | **Plugins** → enable the bundle; check the row is `active`. Installing a new JavaScript generation needs a Harness restart. |
+| No **DeepAI Code** entry in Settings | The browser still holds the boot graph from before the bundle was enabled | Refresh the page; if it is still missing, restart DeepSeek Harness so both halves load. |
 | Every request ends with `auth_required` | No valid credential | Sign in again (delete `$DSH_HOME/deepaicode/account.json` and restart), or set `DEEPAI_CODE_API_KEY`. |
 | `social_login_required` / `email_unverified` | The account may not use DeepAI Code | Use a Google or Apple account, or verify the email on a Pro plan. |
 | `426` on every call, then recovery | DeepAI raised the lane version | The plugin re-probes automatically; a persistent failure means the new lane exceeds the probe window — raise `lane` or open an issue. |
@@ -328,19 +353,23 @@ npm test        # the suite alone
 ```
 
 `scripts/check.mjs` validates the manifest, the loader patch, the locale resources, the icon
-bounds, the plugin market index, that every runtime module imports, that no `@deepseek-ai/*`
-package is imported at runtime, and that no local path or credential pattern reached the
-repository.
+bounds, the plugin market index, that every runtime module imports, that the browser artifact
+registers under the package name into `settings.section` with route paths matching the Host, that
+no `@deepseek-ai/*` package is imported at runtime, and that no local path or credential pattern
+reached the repository.
 
-The 45-test suite covers the routing policy directly: Frontier-before-Unmetered priority,
+The 66-test suite covers the routing policy directly — Frontier-before-Unmetered priority,
 affordability filtering, quota retirement, cooldown expiry, daily reset, authentication abort,
 mid-stream no-replay, empty-response failover, the SSE watchdog, the selector catalog, and the
-plugin entry point.
+plugin entry point — plus the settings connection controller (status shape, key verification,
+sign-out precedence, polling that costs no upstream request) and the browser artifact, which is
+executed in a sandbox to prove its registration and dictionary keys.
 
 ### Layout
 
 ```
 index.js              plugin entry: apply(), credential chain, startup sequence
+client.js             browser half: the Settings → DeepAI Code page
 cordis.patch.yml      loader row with the default config
 index.json            plugin market index (format 1)
 src/adapter.js        llm adapter + Auto routing chain
@@ -353,6 +382,8 @@ src/sse.js            SSE frame reader + idle watchdog
 src/body.js           request body construction and desktop shape fallback
 src/auth.js           RFC 8252 sign-in and credential storage
 src/identity.js       instance id and hashed machine fingerprint
+src/connection.js     connect / disconnect / status controller behind the settings page
+src/routes.js         the /deepaicode/* Host routes and their trust fence
 ```
 
 ---

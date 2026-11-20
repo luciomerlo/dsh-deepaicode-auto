@@ -1,6 +1,6 @@
 {
   "name": "dsh-deepaicode-auto",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "DeepAI Code provider for DeepSeek Harness with a capability-ordered Frontier-to-Unmetered model router, per-turn failover and an SSE idle watchdog.",
   "keywords": [
@@ -21,6 +21,7 @@
   "main": "index.js",
   "exports": {
     ".": "./index.js",
+    "./client": "./client.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg",
     "./index.json": "./index.json",
@@ -37,10 +38,18 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
     }
   },
   "files": [
     "index.js",
+    "client.js",
     "src",
     "cordis.patch.yml",
     "index.json",

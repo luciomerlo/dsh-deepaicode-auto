@@ -12,6 +12,9 @@
         autoModelName: Auto (DeepAiCode)
         maxFailovers: 8
         refreshCatalogOnError: true
+        # Sign-in normally starts from Settings -> DeepAI Code. Set this to true
+        # only for a profile that has no Web GUI to visit.
+        autoSignIn: false
         requestTimeoutMs: 180000
         # A stream that stops producing frames for this long is cancelled and
         # treated as a transport failure, so a stalled connection fails over

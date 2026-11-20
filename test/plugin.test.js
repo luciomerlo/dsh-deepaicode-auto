@@ -2,19 +2,41 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { apply, inject, name, resolveConfig } from '../index.js'
+import { DEEPAICODE_ROUTES } from '../src/routes.js'
 
 /**
  * A minimal Cordis-like context recording what the plugin registers.
  * The effect callback is captured, not run, so activation stays off the network.
+ * @param {{web?: boolean}} [options] - `web` adds the services a Web profile mounts.
  */
-function stubContext() {
+function stubContext(options = {}) {
   const registrations = []
   const effects = []
   const logs = []
+  const routes = []
+  const services = options.web === true
+    ? {
+      webServer: {
+        register(route) {
+          routes.push(route)
+          return () => {}
+        },
+      },
+      connection: {
+        requestRejection() {
+          return undefined
+        },
+      },
+    }
+    : {}
   return {
     registrations,
     effects,
     logs,
+    routes,
+    get(name) {
+      return services[name]
+    },
     llm: {
       registerAdapter(providers, adapter) {
         registrations.push({ providers, adapter })
@@ -100,4 +122,23 @@ test('a configured lane and budget reach the adapter', () => {
     assert.equal(models[0].id, 'smart')
     assert.equal(models[0].name, 'Auto custom')
   })
+})
+
+test('a Web profile gets the five settings routes', () => {
+  const ctx = stubContext({ web: true })
+  apply(ctx, {})
+  const routeEffects = ctx.effects.filter(effect => String(effect.label).startsWith('deepaicode: route '))
+  assert.equal(routeEffects.length, 5, 'each route owns one effect')
+  for (const effect of routeEffects) effect.callback()
+  assert.deepEqual(ctx.routes.map(route => route.path), Object.values(DEEPAICODE_ROUTES))
+  assert.ok(ctx.routes.every(route => route.kind === 'exact'))
+  assert.ok(ctx.routes.every(route => typeof route.handler === 'function'))
+})
+
+test('a headless profile keeps its model provider and mounts no settings routes', () => {
+  const ctx = stubContext()
+  apply(ctx, {})
+  assert.equal(ctx.routes.length, 0)
+  assert.equal(ctx.effects.filter(effect => String(effect.label).startsWith('deepaicode: route ')).length, 0)
+  assert.equal(ctx.registrations.length, 1, 'the provider is registered regardless')
 })
