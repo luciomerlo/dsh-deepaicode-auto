@@ -28,8 +28,8 @@ window.__ModuleLoader__.load({
     }
     /** How often a pending sign-in is polled, in milliseconds. */
     const POLL_MS = 2000
-    /** Settings navigation position: just after Models. */
-    const SECTION_ORDER = 12
+    /** Settings navigation position: between Freebuff and the Plugins section. */
+    const SECTION_ORDER = 13
 
     const DICTIONARY = {
       'section.title': 'DeepAI Code',
@@ -415,8 +415,18 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots', 'locale'],
       apply(ctx) {
-        ctx.locale.register(NS, 'en', DICTIONARY)
-        const translate = ctx.locale.bind(NS)
+        // A module reload (HMR, or the bundle being toggled while the page is
+        // open) runs apply again against the same locale service, and the
+        // namespace allows exactly one occupant. Falling back to the keys keeps
+        // the section usable instead of letting a duplicate registration empty
+        // it out.
+        let translate = key => key
+        try {
+          ctx.locale.register(NS, 'en', DICTIONARY)
+          translate = ctx.locale.bind(NS)
+        } catch (error) {
+          console.warn('deepaicode: the settings page keeps untranslated labels', error)
+        }
 
         const face = {
           translate,
