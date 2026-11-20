@@ -205,17 +205,23 @@ export class AutoRouter {
     const now = this.#now()
     this.#expire(now)
     /** @type {Candidate[]} */
-    const plan = []
+    const frontier = []
+    /** @type {Candidate[]} */
+    const unmetered = []
     for (const candidate of this.#ladder.frontier) {
       if (!this.#available(candidate, now)) continue
       if (!this.#affordable(candidate)) continue
-      plan.push(candidate)
+      frontier.push(candidate)
     }
     for (const candidate of this.#ladder.unmetered) {
       if (!this.#available(candidate, now)) continue
-      plan.push(candidate)
+      unmetered.push(candidate)
     }
-    return plan.slice(0, this.#maxFailovers)
+    // `maxFailovers` bounds the expensive tier only. Capping the combined list
+    // would let a long Frontier ladder push the free tier out of the plan
+    // entirely, so a run could exhaust every paid model and still never reach a
+    // model that costs nothing.
+    return [...frontier.slice(0, this.#maxFailovers), ...unmetered]
   }
 
   /**
@@ -253,7 +259,11 @@ export class AutoRouter {
       case 'quota':
         this.#exhausted.add(candidate.id)
         this.#cooldownReason.set(candidate.id, 'quota')
-        if (candidate.tier === 'frontier' && this.#remaining !== null) this.#remaining = 0
+        // A Frontier refusal for the account's daily allowance retires the whole
+        // paid tier: every other Frontier model draws on the same balance, so
+        // retrying them would only repeat the same 403. Clearing the estimate
+        // also makes the next plan start at the free tier.
+        if (candidate.tier === 'frontier') this.#remaining = 0
         return 'quota'
       case 'busy':
         this.#cooldownUntil.set(candidate.id, now + BUSY_COOLDOWN_MS)

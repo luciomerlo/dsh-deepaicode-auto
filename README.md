@@ -109,12 +109,14 @@ member list so a gap is caught before installation.
 ### Failover pipeline
 
 `runChain()` (`src/adapter.js`) walks the plan and reacts to the class the router assigns to each
-failure (`classifyFailure()`):
+failure (`classifyFailure()`). It **re-plans after every failure** rather than iterating a fixed
+list, so a refusal that changes the account's state takes effect on the very next attempt instead
+of after the whole precomputed list is spent.
 
 | Class | Trigger | Reaction |
 |---|---|---|
 | `auth` | `401`, `auth_required`, `invalid_api_key`, `email_unverified` | Abort the chain. A credential problem is not the model's fault, so no model is cooled and no Theos are wasted on more attempts. |
-| `quota` | `403` `theos_exhausted` / `network_bound` / `check_in_refused`, `429` | Retire the model for the day. The Frontier balance is treated as spent. |
+| `quota` | `403` `theos_exhausted` / `theos_insufficient` / `network_bound` / `check_in_refused`, `429` | Retire the **whole paid tier** for the day: every Frontier model draws on the same balance, and a refusal can mean this request alone costs more than what is left. The free tier serves the turn. |
 | `busy` | `409 session_busy` | 15 s cooldown, next model. |
 | `rejected` | `400`, `413`, `422`, `MALFORMED_RESPONSE`, `EMPTY_RESPONSE` | 10 min cooldown, next model. |
 | `transient` | `5xx`, timeout, transport reset, mid-stream cut | 60 s cooldown, next model. |
@@ -320,7 +322,7 @@ A Config mapping replaces the whole default block, so copy the keys you want to 
 | `autoModelId` | `auto` | Id of the virtual routing model. |
 | `autoModelName` | `Auto (DeepAiCode)` | Display name of the virtual routing model. |
 | `dailyTheosBudget` | `250` | Allowance ceiling used until upstream reports a real one. |
-| `maxFailovers` | `8` | Maximum models tried for one request. |
+| `maxFailovers` | `8` | Maximum **paid** models tried per request. The unmetered tier is always reachable and is never counted against this budget. |
 | `refreshCatalogOnError` | `true` | Re-read `/models` after a model failure. |
 | `autoSignIn` | `false` | Start the browser sign-in during startup, for profiles with no settings page. |
 | `failoverExplicitModels` | `false` | Let an explicitly chosen model continue on the ladder. |
@@ -416,7 +418,7 @@ registers under the package name into `settings.section` with route paths matchi
 no `@deepseek-ai/*` package is imported at runtime, and that no local path or credential pattern
 reached the repository.
 
-The 97-test suite covers the routing policy directly — Frontier-before-Unmetered priority,
+The 102-test suite covers the routing policy directly — Frontier-before-Unmetered priority,
 affordability filtering, quota retirement, cooldown expiry, daily reset, authentication abort,
 mid-stream no-replay, empty-response failover, the SSE watchdog, the selector catalog, and the
 plugin entry point — plus the settings connection controller (status shape, key verification,

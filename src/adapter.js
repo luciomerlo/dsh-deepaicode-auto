@@ -173,6 +173,28 @@ export function createAdapter(parts) {
     const signal = options.signal
     await syncQuota(signal)
 
+    /** Models already attempted for this request. */
+    const tried = new Set()
+    /** Frontier attempts spent so far in this request. */
+    let frontierTries = 0
+    /**
+     * Ask the router again, minus what this request already tried.
+     *
+     * Re-planning after every failure is what makes an exhausted allowance
+     * collapse the paid tier at once: the balance drops to zero, the next plan
+     * holds only unmetered models, and the free tier is reached instead of
+     * repeating the same 403 on every Frontier rung.
+     *
+     * The paid-attempt budget is enforced here, not only inside `plan()`, because
+     * each replan would otherwise hand out a fresh allowance of Frontier rungs.
+     */
+    const pending = () => router.plan().filter(rung => {
+      if (tried.has(rung.id)) return false
+      if (rung.tier === 'frontier' && frontierTries >= config.maxFailovers) return false
+      return true
+    })
+
+    plan = plan.filter(rung => !tried.has(rung.id))
     if (plan.length === 0) {
       yield {
         type: 'finish',
@@ -184,8 +206,14 @@ export function createAdapter(parts) {
       return
     }
 
-    for (let index = 0; index < plan.length; index += 1) {
-      const candidate = plan[index]
+    // A hard ceiling keeps a provider whose failures never cool a model down
+    // from looping this request forever.
+    const ceiling = config.maxFailovers + router.ladder.unmetered.length + 1
+
+    for (let round = 1; round <= ceiling && plan.length > 0; round += 1) {
+      const candidate = plan[0]
+      tried.add(candidate.id)
+      if (candidate.tier === 'frontier') frontierTries += 1
       if (signal?.aborted === true) {
         yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'the request was cancelled', code: 'ABORTED' } } }
         return
@@ -238,20 +266,29 @@ export function createAdapter(parts) {
         return
       }
 
-      const next = plan[index + 1]
-      router.recordHandoff(candidate.id, next?.id ?? 'none', reaction)
+      const rest = pending()
+      router.recordHandoff(candidate.id, rest[0]?.id ?? 'none', reaction)
       logger.warn(
         `deepaicode: ${candidate.id} failed (${reaction}: ${terminal.code ?? 'unknown'}); `
-        + `${next === undefined ? 'no model left' : `switching to ${next.id}`}`,
+        + `${rest[0] === undefined ? 'no model left' : `switching to ${rest[0].id}`}`,
       )
       refreshCatalogInBackground()
-      if (next === undefined) {
+      if (rest.length === 0) {
         yield {
           type: 'finish',
           reason: { kind: 'error', failure: { ...terminal, message: `${label} exhausted every model: ${terminal.message ?? ''}` } },
         }
         return
       }
+      plan = rest
+    }
+
+    yield {
+      type: 'finish',
+      reason: {
+        kind: 'error',
+        failure: { message: `${label}: gave up after ${String(tried.size)} model attempt(s)`, code: 'NO_MODEL_AVAILABLE' },
+      },
     }
   }
 

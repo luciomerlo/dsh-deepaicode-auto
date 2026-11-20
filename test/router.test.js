@@ -115,10 +115,34 @@ test('an unmetered success never touches the allowance', () => {
   assert.equal(router.remaining, 3, 'a Frontier call is priced by the provider, not by us')
 })
 
-test('the attempt list is capped by maxFailovers', () => {
+test('maxFailovers caps the paid tier but never drops the free tier', () => {
   const now = { value: 1_000 }
   const router = routerAt(now, { maxFailovers: 2 })
-  assert.equal(router.plan().length, 2)
+  const plan = router.plan()
+  assert.deepEqual(plan.map(c => c.id), ['big', 'mid', 'free-a', 'free-b'])
+  assert.deepEqual(plan.filter(c => c.tier === 'frontier').map(c => c.id), ['big', 'mid'])
+  assert.equal(plan.filter(c => c.tier === 'unmetered').length, 2, 'the free tier is always reachable')
+})
+
+test('a quota refusal on a Frontier model retires the whole paid tier', () => {
+  const now = { value: 1_000 }
+  const router = routerAt(now)
+  router.setQuota(250)
+  const [big] = router.plan()
+  assert.equal(router.recordFailure(big, { status: 403, code: 'theos_insufficient', message: 'You do not have enough Theos left for this request.' }), 'quota')
+  // Every Frontier model draws on the same balance, so retrying them would only
+  // repeat the same 403; the next plan starts at the free tier.
+  assert.deepEqual(router.plan().map(c => c.id), ['free-a', 'free-b'])
+  assert.equal(router.remaining, 0)
+})
+
+test('a quota refusal with an unknown balance still retires the paid tier', () => {
+  const now = { value: 1_000 }
+  const router = routerAt(now)
+  assert.equal(router.remaining, null)
+  const [big] = router.plan()
+  router.recordFailure(big, { status: 403, message: 'not enough Theos' })
+  assert.deepEqual(router.plan().map(c => c.id), ['free-a', 'free-b'])
 })
 
 test('recordHandoff keeps the fallback history the plugin reports', () => {

@@ -70,6 +70,7 @@ const CONFIG = {
   autoModelId: 'auto',
   autoModelName: 'Auto (DeepAiCode)',
   refreshCatalogOnError: true,
+  maxFailovers: 8,
   frontier: [
     { id: 'frontier-a', theos: 20, label: 'Frontier A' },
     { id: 'frontier-b', theos: 10, label: 'Frontier B' },
@@ -89,7 +90,7 @@ const LOGGER = { info() {}, warn() {}, debug() {} }
 /** Build an adapter over the given scripts and config. */
 function buildAdapter(scripts, config = CONFIG) {
   const client = stubClient(scripts)
-  const router = new AutoRouter({ budget: 250, maxFailovers: 8 })
+  const router = new AutoRouter({ budget: 250, maxFailovers: config.maxFailovers ?? 8 })
   const adapter = createAdapter({ router, client, catalog: CATALOG, config, logger: LOGGER })
   return { adapter, client, router }
 }
@@ -124,13 +125,17 @@ test('Auto switches to the next Frontier model when the first throws', async () 
 })
 
 test('Auto falls through to Unmetered when the allowance is gone', async () => {
-  const { adapter, client } = buildAdapter({
+  const { adapter, client, router } = buildAdapter({
     'frontier-a': { error: new UpstreamError(403, 'theos_exhausted', 'daily Theos allowance is used up') },
     'frontier-b': { error: new UpstreamError(403, 'theos_exhausted', 'daily Theos allowance is used up') },
     'free-a': { frames: stopFrames('hello from deepseek flash') },
   })
   const chunks = await collect(adapter.stream({ provider: 'deepaicode', model: 'auto', messages: [] }))
-  assert.deepEqual(client.calls, ['frontier-a', 'frontier-b', 'free-a'])
+  // One paid refusal retires the tier: the second paid model is never asked,
+  // because it draws on the same exhausted balance.
+  assert.deepEqual(client.calls, ['frontier-a', 'free-a'])
+  assert.equal(router.remaining, 0)
+  assert.ok(router.plan().every(c => c.tier === 'unmetered'), 'only the free tier is left')
   assert.equal(chunks.filter(c => c.type === 'text-delta').map(c => c.text).join(''), 'hello from deepseek flash')
   assert.deepEqual(chunks.at(-1), { type: 'finish', reason: { kind: 'stop' } })
 })
@@ -305,4 +310,45 @@ test('the image-pricing defaults match the base adapter, because no image is eve
   assert.equal(adapter.imageRequestPricing('deepaicode', 'frontier-a'), undefined)
   const target = adapter.imageRequestTarget('deepaicode', 'auto', { width: 640, height: 480, bytes: 1234 })
   assert.deepEqual(target, { width: 640, height: 480, maxBytes: 1234 })
+})
+
+/** A paid ladder longer than any failover budget. */
+function longPaidLadder(length) {
+  return Array.from({ length }, (_, index) => ({ id: `paid-${String(index)}`, theos: 10, label: `Paid ${String(index)}` }))
+}
+
+test('an exhausted allowance drops from the first paid rung straight to the free tier', async () => {
+  const scripts = {
+    'paid-0': { error: new UpstreamError(403, 'theos_insufficient', 'You do not have enough Theos left for this request.') },
+    'free-a': { frames: stopFrames('free answer') },
+  }
+  const { adapter, client } = buildAdapter(scripts, { ...CONFIG, frontier: longPaidLadder(10) })
+  const chunks = await collect(adapter.stream({ provider: 'deepaicode', model: 'auto', messages: [] }))
+  // The other nine paid models share the same balance, so retrying them would
+  // only repeat the 403; the free tier must serve the turn.
+  assert.deepEqual(client.calls, ['paid-0', 'free-a'])
+  assert.equal(chunks.filter(c => c.type === 'text-delta').map(c => c.text).join(''), 'free answer')
+  assert.deepEqual(chunks.at(-1), { type: 'finish', reason: { kind: 'stop' } })
+})
+
+test('a paid ladder longer than maxFailovers still reaches the free tier', async () => {
+  const scripts = {}
+  for (let index = 0; index < 10; index += 1) {
+    scripts[`paid-${String(index)}`] = { error: new UpstreamError(500, 'server_error', 'boom') }
+  }
+  scripts['free-a'] = { frames: stopFrames('free answer') }
+  const { adapter, client } = buildAdapter(scripts, { ...CONFIG, maxFailovers: 3, frontier: longPaidLadder(10) })
+  const chunks = await collect(adapter.stream({ provider: 'deepaicode', model: 'auto', messages: [] }))
+  assert.deepEqual(client.calls, ['paid-0', 'paid-1', 'paid-2', 'free-a'], 'exactly the paid budget, then the free tier')
+  assert.equal(chunks.filter(c => c.type === 'text-delta').map(c => c.text).join(''), 'free answer')
+})
+
+test('the free tier is used only after the paid budget is spent', async () => {
+  const scripts = { 'free-a': { frames: stopFrames('free') } }
+  scripts['paid-0'] = { error: new UpstreamError(502, 'server_error', 'boom') }
+  scripts['paid-1'] = { frames: stopFrames('paid answer') }
+  const { adapter, client } = buildAdapter(scripts, { ...CONFIG, maxFailovers: 3, frontier: longPaidLadder(4) })
+  const chunks = await collect(adapter.stream({ provider: 'deepaicode', model: 'auto', messages: [] }))
+  assert.deepEqual(client.calls, ['paid-0', 'paid-1'], 'a working paid model is preferred over the free tier')
+  assert.equal(chunks.filter(c => c.type === 'text-delta').map(c => c.text).join(''), 'paid answer')
 })
